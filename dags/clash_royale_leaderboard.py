@@ -1,6 +1,7 @@
 import datetime
 import pendulum
 import os
+import logging
 
 import polars as pl
 import json
@@ -98,7 +99,7 @@ def process_clash_royale_leaderboard():
 
     @task
     def fetch_and_write_merge_tactics_date():
-        url = BASE_URL + f"leaderboard/743200?limit=1000" 
+        url = BASE_URL + f"leaderboard/743200?limit=10000" 
 
         df = (
             get_data(url)
@@ -144,6 +145,7 @@ def process_clash_royale_leaderboard():
             conn.commit()
             return 0
         except Exception as e:
+            logging.error(f"Task failed: {e}")
             return 1
 
     @task
@@ -170,34 +172,52 @@ def process_clash_royale_leaderboard():
             conn.commit()
             return 0
         except Exception as e:
+            logging.error(f"Task failed: {e}")
             return 1
 
-    @task
-    def player_ranking():
-        create_player_ranking_table = SQLExecuteQueryOperator(
-            task_id = "create_player_ranking_table",
-            conn_id="tutorial_pg_conn",
-            sql="""
-                CREATE TABLE IF NOT EXISTS player_ranking (
-                tag VARCHAR(15) PRIMARY KEY,
-                name TEXT NOT NULL,
-                path_of_legend_rank SMALLINT CHECK (rank > 0),
-                merge_tactics_rank SMALLINT CHECK (rank > 0),
-                clan JSONB
-                );
-            """
-        )
-        query = """
-            CREAT
-
-        path_of_legend
-        merge_tactics
-        player_ranking
-            
+    create_player_ranking_table = SQLExecuteQueryOperator(
+        task_id = "create_player_ranking_table",
+        conn_id="tutorial_pg_conn",
+        sql="""
+            DROP TABLE IF EXISTS player_ranking;
+            CREATE TABLE player_ranking AS
+            SELECT
+                p.tag,
+                p.name,
+                p.clan ->> 'name' clan_name,
+                p.rank path_of_legend_rank,
+                m.rank merge_tactics_rank
+            FROM path_of_legend p
+            INNER JOIN merge_tactics m
+            ON p.tag = m.tag
+            ORDER BY path_of_legend_rank DESC
         """
+    )
 
-    create_path_of_legend_table >> fetch_and_write_path_of_legend_data() >> upsert_path_of_legend()
-    create_merge_tactics_table >> fetch_and_write_merge_tactics_date() >> upsert_merge_tactics()
+    create_top_clan_table = SQLExecuteQueryOperator(
+        task_id = "create_top_clan_table",
+        conn_id="tutorial_pg_conn",
+        sql="""
+            DROP TABLE IF EXISTS top_clan;
+            CREATE TABLE top_clan AS
+            SELECT
+                p.clan ->> 'name' clan_name,
+                COUNT(DISTINCT p.tag) player_count
+            FROM path_of_legend p
+            FULL JOIN merge_tactics m
+            ON p.tag = m.tag
+            GROUP BY clan_name
+            ORDER BY player_count DESC
+            LIMIT 100
+        """
+    )
+
+    upsert_path_of_legend = upsert_path_of_legend()
+    upsert_merge_tactics = upsert_merge_tactics()
+    create_path_of_legend_table >> fetch_and_write_path_of_legend_data() >> upsert_path_of_legend
+    create_merge_tactics_table >> fetch_and_write_merge_tactics_date() >> upsert_merge_tactics
+    [upsert_path_of_legend, upsert_merge_tactics] >> create_player_ranking_table
+    [upsert_path_of_legend, upsert_merge_tactics] >> create_top_clan_table
 
 
 dag = process_clash_royale_leaderboard()
