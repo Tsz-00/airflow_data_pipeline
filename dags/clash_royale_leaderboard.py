@@ -16,72 +16,105 @@ load_dotenv()
 @dag(
     dag_id="clash_royale_leaderboard",
     schedule="*/10 * * * *",
-    start_date=pendulum.datetime(2026, 11, 26, tz="UTC"),
+    start_date=pendulum.datetime(2026, 10, 20, tz="UTC"),
     catchup=False,
     dagrun_timeout=datetime.timedelta(minutes=60),
 )
 def process_clash_royale_leaderboard():
-    create_leaderboard_table = SQLExecuteQueryOperator(
-        task_id="create_leaderboard_table",
+    BASE_URL = "https://api.clashroyale.com/v1/"
+    headers = {
+        "Authorization": f"Bearer {os.getenv("CLASH_ROYALE_API_TOKEN")}",
+        "Content-Type": "application/json"
+    }
+
+    create_path_of_legend_table = SQLExecuteQueryOperator(
+        task_id="create_path_of_legend_table",
         conn_id="tutorial_pg_conn",
         sql="""
-            CREATE TABLE IF NOT EXISTS clash_royale_leaderboard (
-                "tag" VARCHAR(15) PRIMARY KEY,
-                "name" TEXT NOT NULL,
-                "eloRating" SMALLINT NOT NULL,
-                "rank" SMALLINT NOT NULL,
-                "ingestion_timestamp" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            CREATE TABLE IF NOT EXISTS path_of_legend (
+                tag VARCHAR(15) PRIMARY KEY,
+                name TEXT NOT NULL,
+                level SMALLINT CHECK (level > 0)
+                score SMALLINT CHECK (score > 0),
+                rank SMALLINT CHECK (rank > 0),
+                clan JSONB,
+                ingestion_timestamp TIMESTAMPTZ DEFAULT NOW()
             );""",
     )
 
-    create_leaderboard_temp_table = SQLExecuteQueryOperator(
-        task_id="create_leaderboard_temp_table",
+    create_merge_tactics_table = SQLExecuteQueryOperator(
+        task_id = "create_merge_tactics_table",
         conn_id="tutorial_pg_conn",
         sql="""
-            DROP TABLE IF EXISTS clash_royale_leaderboard_temp;
-            CREATE TABLE IF NOT EXISTS clash_royale_leaderboard_temp (
-                "tag" VARCHAR(15) PRIMARY KEY,
-                "name" TEXT NOT NULL,
-                "eloRating" SMALLINT NOT NULL,
-                "rank" SMALLINT NOT NULL,
-                "ingestion_timestamp" TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-            );""",
+            CREATE TABLE IF NOT EXISTS merge_tactics (
+            tag VARCHAR(15) PRIMARY KEY,
+            name TEXT NOT NULL,
+            rank SMALLINT CHECK (rank > 0),
+            score SMALLINT CHECK (score > 0),
+            clan JSONB
+            ingestion_timestamp TIMESTAMPTZ DEFAULT NOW()
+            );
+            """
     )
 
-    @task
-    def get_data():
-        #DATA_DIR = "/opt/airflow/dags/files/clash_royale_leaderboard.parquet"
-        URL = "https://api.clashroyale.com/v1/locations/global/pathoflegend/players?limit=10000"
-        headers = {
-            "Authorization": f"Bearer {os.getenv("CLASH_ROYALE_API_TOKEN")}",
-            "Content-Type": "application/json"
-        }
-
-        #os.makedirs(os.path.dirname(DATA_DIR), exist_ok=True)
-
+    def get_data(url) -> pl.DataFrame:
         try:
-            response = requests.get(URL, headers=headers, timeout=30)
+            response = requests.get(url, headers=headers, timeout=30)
         except Exception as e:
             print(e)
+            return pl.DataFrame()
         else:
-            df = (
-                pl.DataFrame(json.loads(response.content).get("items"))
-                .select("tag", "name", "eloRating", "rank")
-                .with_columns(
-                    ingestion_timestamp = datetime.datetime.now()
-                )
-            )
-            #df.write_parquet(DATA_DIR)
+            df = pl.DataFrame(json.loads(response.content).get("items"))
+            return df
 
-            postgres_hook = PostgresHook(postgres_conn_id="tutorial_pg_conn")
-            conn = postgres_hook.get_uri()
+    @task
+    def fetch_and_write_path_of_legend_data():
+        url = BASE_URL + "locations/global/pathoflegend/players?limit=1000"
+        rename_cols = {
+            "expLevel": "level",
+            "eloRatin": "score"
+        }
 
-            df.write_database(
-                table_name="clash_royale_leaderboard_temp",
-                connection=conn,
-                if_table_exists="replace",
-                engine="sqlalchemy",
+        df = (
+            get_data(url)
+            .rename(rename_cols)
+            .select("tag", "name", "level", "score", "rank", "clan")
+            .with_columns(
+                clan = pl.col("clan").struct.json_encode()
             )
+        )
+
+        postgres_hook = PostgresHook(postgres_conn_id="tutorial_pg_conn")
+        conn = postgres_hook.get_uri()
+
+        df.write_database(
+            table_name="path_of_legend",
+            connection=conn,
+            if_table_exists="append",
+            engine="sqlalchemy",
+        )
+
+    @task
+    def fetch_and_write_merge_tactics_date():
+        url = BASE_URL + f"leaderboard/743200?limit=1000" 
+
+        df = (
+            get_data(url)
+            .select("tag", "name", "rank", "score", "clan")
+            .with_columns(
+                clan = pl.col("clan").struct.json_encode()
+            )
+        )
+
+        postgres_hook = PostgresHook(postgres_conn_id="tutorial_pg_conn")
+        conn = postgres_hook.get_uri()
+
+        df.write_database(
+            table_name="merge_tactics",
+            connection=conn,
+            if_table_exists="append",
+            engine="sqlalchemy",
+        )
             
     @task
     def merge_data():
@@ -108,7 +141,7 @@ def process_clash_royale_leaderboard():
         except Exception as e:
             return 1
 
-    [create_leaderboard_table, create_leaderboard_temp_table] >> get_data() >> merge_data()
+    [create_leaderboard_table] >> get_data() >> merge_data()
 
 
 dag = process_clash_royale_leaderboard()
