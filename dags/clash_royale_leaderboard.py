@@ -34,12 +34,13 @@ def process_clash_royale_leaderboard():
             CREATE TABLE IF NOT EXISTS path_of_legend (
                 tag VARCHAR(15) PRIMARY KEY,
                 name TEXT NOT NULL,
-                level SMALLINT CHECK (level > 0)
+                level SMALLINT CHECK (level > 0),
                 score SMALLINT CHECK (score > 0),
                 rank SMALLINT CHECK (rank > 0),
                 clan JSONB,
                 ingestion_timestamp TIMESTAMPTZ DEFAULT NOW()
-            );""",
+            );
+        """
     )
 
     create_merge_tactics_table = SQLExecuteQueryOperator(
@@ -51,10 +52,10 @@ def process_clash_royale_leaderboard():
             name TEXT NOT NULL,
             rank SMALLINT CHECK (rank > 0),
             score SMALLINT CHECK (score > 0),
-            clan JSONB
+            clan JSONB,
             ingestion_timestamp TIMESTAMPTZ DEFAULT NOW()
             );
-            """
+        """
     )
 
     def get_data(url) -> pl.DataFrame:
@@ -72,7 +73,7 @@ def process_clash_royale_leaderboard():
         url = BASE_URL + "locations/global/pathoflegend/players?limit=1000"
         rename_cols = {
             "expLevel": "level",
-            "eloRatin": "score"
+            "eloRating": "score"
         }
 
         df = (
@@ -80,7 +81,8 @@ def process_clash_royale_leaderboard():
             .rename(rename_cols)
             .select("tag", "name", "level", "score", "rank", "clan")
             .with_columns(
-                clan = pl.col("clan").struct.json_encode()
+                clan = pl.col("clan").struct.json_encode(),
+                ingestion_timestamp = datetime.datetime.now()
             )
         )
 
@@ -88,9 +90,9 @@ def process_clash_royale_leaderboard():
         conn = postgres_hook.get_uri()
 
         df.write_database(
-            table_name="path_of_legend",
+            table_name="path_of_legend_temp",
             connection=conn,
-            if_table_exists="append",
+            if_table_exists="replace",
             engine="sqlalchemy",
         )
 
@@ -102,7 +104,8 @@ def process_clash_royale_leaderboard():
             get_data(url)
             .select("tag", "name", "rank", "score", "clan")
             .with_columns(
-                clan = pl.col("clan").struct.json_encode()
+                clan = pl.col("clan").struct.json_encode(),
+                ingestion_timestamp = datetime.datetime.now()
             )
         )
 
@@ -110,26 +113,28 @@ def process_clash_royale_leaderboard():
         conn = postgres_hook.get_uri()
 
         df.write_database(
-            table_name="merge_tactics",
+            table_name="merge_tactics_temp",
             connection=conn,
-            if_table_exists="append",
+            if_table_exists="replace",
             engine="sqlalchemy",
         )
-            
+
     @task
-    def merge_data():
+    def upsert_path_of_legend():
         query = """
-            MERGE INTO clash_royale_leaderboard t
-            USING (SELECT DISTINCT * FROM clash_royale_leaderboard_temp) s
+            MERGE INTO path_of_legend t
+            USING (SELECT DISTINCT * FROM path_of_legend_temp) s
             ON t.tag = s.tag
             WHEN MATCHED THEN UPDATE SET
                 name = s.name,
-                eloRating = s.eloRating
-                rank = s.rank
+                level = s.level,
+                score = s.score,
+                rank = s.rank,
+                clan = s.clan::jsonb,
                 ingestion_timestamp = s.ingestion_timestamp
             WHEN NOT MATCHED THEN
-                INSERT (tag, name, eloRating, rank, ingestion_timestamp)
-                VALUES (s.tag, s.name, s.eloRating, s.rank, s.ingestion_timestamp))
+                INSERT (tag, name, level, score, rank, clan, ingestion_timestamp)
+                VALUES (s.tag, s.name, s.level, s.score, s.rank, s.clan::jsonb, s.ingestion_timestamp)
         """
         try:
             postgres_hook = PostgresHook(postgres_conn_id="tutorial_pg_conn")
@@ -141,7 +146,58 @@ def process_clash_royale_leaderboard():
         except Exception as e:
             return 1
 
-    [create_leaderboard_table] >> get_data() >> merge_data()
+    @task
+    def upsert_merge_tactics():
+        query = """
+            MERGE INTO merge_tactics t
+            USING (SELECT DISTINCT * FROM merge_tactics_temp) s
+            ON t.tag = s.tag
+            WHEN MATCHED THEN UPDATE SET
+                name = s.name,
+                rank = s.rank,
+                score = s.score,
+                clan = s.clan::jsonb,
+                ingestion_timestamp = s.ingestion_timestamp
+            WHEN NOT MATCHED THEN
+                INSERT (tag, name, rank, score, clan, ingestion_timestamp)
+                VALUES (s.tag, s.name, s.rank, s.score, s.clan::jsonb, s.ingestion_timestamp)
+        """
+        try:
+            postgres_hook = PostgresHook(postgres_conn_id="tutorial_pg_conn")
+            conn = postgres_hook.get_conn()
+            cur = conn.cursor()
+            cur.execute(query)
+            conn.commit()
+            return 0
+        except Exception as e:
+            return 1
+
+    @task
+    def player_ranking():
+        create_player_ranking_table = SQLExecuteQueryOperator(
+            task_id = "create_player_ranking_table",
+            conn_id="tutorial_pg_conn",
+            sql="""
+                CREATE TABLE IF NOT EXISTS player_ranking (
+                tag VARCHAR(15) PRIMARY KEY,
+                name TEXT NOT NULL,
+                path_of_legend_rank SMALLINT CHECK (rank > 0),
+                merge_tactics_rank SMALLINT CHECK (rank > 0),
+                clan JSONB
+                );
+            """
+        )
+        query = """
+            CREAT
+
+        path_of_legend
+        merge_tactics
+        player_ranking
+            
+        """
+
+    create_path_of_legend_table >> fetch_and_write_path_of_legend_data() >> upsert_path_of_legend()
+    create_merge_tactics_table >> fetch_and_write_merge_tactics_date() >> upsert_merge_tactics()
 
 
 dag = process_clash_royale_leaderboard()
