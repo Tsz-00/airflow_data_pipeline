@@ -1,0 +1,3 @@
+polars==1.8.0
+python-dotenv==1.2.4
+adbc_driver_manager

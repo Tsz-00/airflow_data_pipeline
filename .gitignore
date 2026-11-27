@@ -1,0 +1,54 @@
+# Airflow Configuration & Secrets
+airflow.cfg
+unittests.cfg
+webserver_config.py
+airflow_login.py
+secrets.py
+.env
+
+# Airflow Databases
+airflow.db
+unittests.db
+*.sqlite
+*.sqlite3
+
+# Airflow Logs & Runtime PIDs
+logs/
+airflow-webserver.pid
+airflow-scheduler.pid
+airflow-worker.pid
+airflow-*.err
+airflow-*.out
+airflow-*.log
+airflow-*.pid
+log.txt*
+
+# Python Artifacts & Virtual Environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+wheels/
+*.egg-info/
+.venv/
+venv/
+env/
+.uv/
+
+# Testing & Coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+nosetests.xml
+
+# IDEs & OS Files
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
